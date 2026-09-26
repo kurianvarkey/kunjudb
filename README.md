@@ -174,9 +174,60 @@ err := db.Transaction(ctx, func(exec kunjudb.SqlExecutor) error {
 
 ---
 
+## 🔒 Production Safety
+
+### WHERE Clause Guard
+`Update` and `Delete` **refuse to run without at least one user-supplied `WHERE` condition** by default, preventing accidental full-table wipes:
+
+```go
+// ❌ Returns ErrMissingWhereClause — no WHERE supplied
+kunjudb.Table[User](db, "users").Update(ctx, map[string]any{"active": false})
+
+// ✅ Safe — WHERE condition present
+kunjudb.Table[User](db, "users").
+    Where("active", "=", true).
+    Update(ctx, map[string]any{"active": false})
+
+// ✅ Intentional bulk operation — explicitly opt-in
+kunjudb.Table[User](db, "users").
+    AllowFullTable().
+    Update(ctx, map[string]any{"active": false})
+```
+
+You can detect the error with `errors.Is`:
+```go
+if errors.Is(err, kunjudb.ErrMissingWhereClause) {
+    // missing WHERE — likely a programming error
+}
+```
+
+### Connection Pool (Required for Production)
+Always configure the connection pool on startup. Go's default is unlimited connections with no idle timeout, which causes connection exhaustion under load:
+
+```go
+pool, err := sql.Open("postgres", dsn)
+if err != nil {
+    log.Fatal(err)
+}
+
+pool.SetMaxOpenConns(25)                 // max simultaneous connections
+pool.SetMaxIdleConns(10)                 // keep-alive pool size
+pool.SetConnMaxLifetime(5 * time.Minute) // recycle connections (avoids stale TCP)
+pool.SetConnMaxIdleTime(1 * time.Minute) // release idle connections
+```
+
+---
+
 ## 📝 SQL Query Logging
 
 The `middleware/logger` package provides query logging with safe parameter interpolation (`$1, $2` or `?`), execution timing, and zero-allocation fast-paths designed for production.
+
+### Outputs
+
+The logger inspects each target writer's underlying type:
+- **Terminal devices** (`os.Stdout`, `os.Stderr`, buffers) -> Clean emoji formatting: `✅ ⚠️ ❌`
+- **Disk files** (`*os.File` regular files) -> Structured timestamped Laravel-style lines: `[timestamp] LEVEL: sql (ms)`
+- **JSON mode** (`JSON: true`) -> Structured JSON via `log/slog` for cloud aggregators
 
 ### Production Default Behavior (Slow Queries & Errors Only)
 By default, the logger adheres to strict production hygiene:
@@ -196,10 +247,17 @@ import "github.com/kurianvarkey/kunjudb/middleware/logger"
 // 1. Standard 1-liner (logs slow queries >100ms and errors to os.Stdout)
 db := kunjudb.New(pool, dialects.PostgreSql{}, logger.Default())
 
-// 2. Custom slow query threshold (e.g. 200ms)
-db.Use(logger.New(logger.Config{
+// 2. Custom slow query threshold (e.g. 200ms) — constructor style
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.New(logger.Config{
     SlowThreshold: 200 * time.Millisecond,
 }))
+
+// 3. Fluent Use style — useful for conditional middleware setup
+db := kunjudb.New(pool, dialects.PostgreSql{})
+db.Use(logger.Default())
+if isProd {
+    db.Use(guard.Profile(guard.ProfileStrict))
+}
 ```
 
 ---
@@ -210,30 +268,41 @@ Configure behavior using standard Go types (`io.Writer` and `*slog.Logger`):
 
 ```go
 type Config struct {
-    Writer        io.Writer     // Destination (os.Stdout, file, or io.MultiWriter)
-    SlowThreshold time.Duration // Slow query threshold (defaults to 100ms)
-    Profile       bool          // If true, logs EVERY query (or via DB_PROFILE=true)
-    JSON          bool          // If true, outputs structured JSON via log/slog
-    Logger        *slog.Logger  // Optional custom slog.Logger (takes precedence)
+    Writer        io.Writer     // Output destination (single writer or logger.MultiWriter). Defaults to os.Stdout.
+    SlowThreshold time.Duration // Slow query threshold (defaults to 100ms).
+    Profile       bool          // Log EVERY query.
+    JSON          bool          // Structured JSON lines via log/slog (for cloud collectors).
+    Logger        *slog.Logger  // Custom slog.Logger (takes precedence over Writer and JSON).
 }
 ```
 
+> [!WARNING]
+> **Never set `Profile: true` in production.** It allocates on every query and will flood your logs under load. Use `SlowThreshold` for production observability instead.
+
 #### 1. Local Development (Log Every Query to Console)
-Turn on profiling to inspect every executed query and its interpolated parameters:
+Turn on profiling in local development by injecting your application configuration:
 ```go
-db.Use(logger.New(logger.Config{
-    Profile: true, // or run with DB_PROFILE=true in local .env
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.New(logger.Config{
+    Profile: os.Getenv("APP_ENV") == "local", // ⚠️ injected explicitly — never hardcoded in production
 }))
 ```
-**Sample Console Output:**
+**Terminal Output:**
 ```text
 ✅ [1.45 ms] SELECT * FROM users WHERE id = 1 AND active = TRUE
+⚠️  [SLOW QUERY] (145.20 ms): SELECT * FROM orders WHERE total > 1000
+❌ [SQL ERROR] (2.10 ms): INSERT INTO users ... | err: duplicate key value
+```
+**File Output:**
+```text
+[2026-09-26 09:07:30] local.INFO: SELECT * FROM users WHERE id = 1 AND active = TRUE (1.45 ms)
+[2026-09-26 09:07:30] local.WARNING: SELECT * FROM orders WHERE total > 1000 (145.20 ms)
+[2026-09-26 09:07:30] local.ERROR: INSERT INTO users ... (2.10 ms) | err: duplicate key value
 ```
 
 #### 2. Production Structured JSON (`log/slog`)
 Recommended for cloud collectors (Datadog, AWS CloudWatch, Grafana Loki, ELK). Fast queries are silent; only slow queries and failures are emitted:
 ```go
-db.Use(logger.New(logger.Config{
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.New(logger.Config{
     JSON:          true,                   // structured JSON lines
     SlowThreshold: 100 * time.Millisecond, // customizable threshold
 }))
@@ -243,31 +312,34 @@ db.Use(logger.New(logger.Config{
 {"time":"2026-09-26T12:00:00Z","level":"WARN","msg":"Slow SQL Query","sql":"SELECT * FROM orders WHERE status = 'pending'","duration_ms":152.4,"slow_query":true}
 ```
 
-#### 3. Terminal + File Dual Logging
-Stream logs to both the terminal (`os.Stdout`) and a log file using standard `io.MultiWriter` and proper resource cleanup:
+#### 3. Dual Logging (Terminal + File via `logger.MultiWriter`)
+Use `logger.MultiWriter(os.Stdout, logFile)` to log to both terminal and file simultaneously. The logger checks each target's underlying type automatically:
+- Terminal devices get **emoji-tagged lines**
+- Disk files get **timestamped Laravel-style lines**
+
 ```go
-logFile, err := os.OpenFile("sql.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+if err := os.MkdirAll("logs", 0755); err != nil {
+    log.Fatal(err)
+}
+
+logFile, err := os.OpenFile("logs/sql.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 if err != nil {
     log.Fatal(err)
 }
-defer logFile.Close() // Proper resource hygiene
+defer logFile.Close()
 
-db.Use(logger.New(logger.Config{
-    Writer:        io.MultiWriter(os.Stdout, logFile),
-    SlowThreshold: 100 * time.Millisecond,
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.New(logger.Config{
+    Writer: logger.MultiWriter(os.Stdout, logFile), // automatically detects terminal vs file
 }))
 ```
 
 #### 4. Custom Application Logger Injection
 Pass your existing service `*slog.Logger` to inherit application log levels, context handlers, and formats:
 ```go
-db.Use(logger.New(logger.Config{
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.New(logger.Config{
     Logger: myAppLogger,
 }))
 ```
-
-### Environment Variable
-- `DB_PROFILE=true`: Forces all queries to be logged across any environment without code changes.
 
 ## 🔍 Profiler & Automated Index Advisor
 

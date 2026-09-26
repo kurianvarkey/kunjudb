@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
@@ -20,7 +20,6 @@ var (
 		`ALTER\s+TABLE`,
 		`DROP\s+DATABASE`,
 	}
-	errFormat = "🚨 SECURITY ALERT: Blocked query: %s\n"
 )
 
 type sqlGuard struct {
@@ -48,7 +47,9 @@ func New(keywords ...string) kunjudb.Middleware {
 
 func (g *sqlGuard) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	if !g.isSafe(query) {
-		fmt.Printf(errFormat, query)
+		slog.WarnContext(ctx, "🚨 SECURITY ALERT: dangerous SQL command blocked",
+			slog.String("query", query),
+		)
 		return nil, ErrDangerousSQL
 	}
 	return g.inner.ExecContext(ctx, query, args...)
@@ -56,7 +57,9 @@ func (g *sqlGuard) ExecContext(ctx context.Context, query string, args ...any) (
 
 func (g *sqlGuard) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	if !g.isSafe(query) {
-		fmt.Printf(errFormat, query)
+		slog.WarnContext(ctx, "🚨 SECURITY ALERT: dangerous SQL command blocked",
+			slog.String("query", query),
+		)
 		return nil, ErrDangerousSQL
 	}
 	return g.inner.QueryContext(ctx, query, args...)
