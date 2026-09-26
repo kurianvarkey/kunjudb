@@ -42,17 +42,17 @@ func isSoftDeletable[T any]() bool {
 
 // QueryBuilder provides a type-safe fluent SQL builder.
 type QueryBuilder[T any] struct {
-	executor        executor.SqlExecutor
-	dialect         dialects.Dialect
-	table           string
-	columns         []string
-	conditions      []string
-	args            []any
-	orderBy         []string
-	limit           int
-	offset          int
-	hasUserCond     bool // true when at least one user-supplied WHERE condition exists
-	allowFullTable  bool // when true, Update/Delete without WHERE conditions is permitted
+	executor       executor.SqlExecutor
+	dialect        dialects.Dialect
+	table          string
+	columns        []string
+	conditions     []string
+	args           []any
+	orderBy        []string
+	limit          int
+	offset         int
+	hasUserCond    bool // true when at least one user-supplied WHERE condition exists
+	allowFullTable bool // when true, Update/Delete without WHERE conditions is permitted
 }
 
 // New returns a QueryBuilder for the given table.
