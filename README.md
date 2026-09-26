@@ -291,14 +291,15 @@ When enabled, queries exceeding `SlowThreshold` are logged via `log/slog`. If at
 
 Head-to-head comparison scanning 100 records:
 
-| Scanner Implementation | Speed (`ns/op`) | Memory (`B/op`) | Allocs (`allocs/op`) | Type-Safety |
+| Scanner Implementation | Speed (`ns/op`) | Memory (`B/op`) | Allocs (`allocs/op`) | Efficiency vs Manual |
 | :--- | :--- | :--- | :--- | :--- |
-| **KunjuDB `MapRaw`** | **26,129 ns** | **12,139 B** | **108 allocs** | **Automatic & Dynamic** |
-| Handwritten `rows.Scan()` | 24,821 ns | 12,594 B | 111 allocs | Manual & Error-Prone |
-| Naive Reflection ORM | ~45,000 ns | ~45,000 B | ~350 allocs | Automatic |
+| **KunjuDB `MapRaw`** | **24,402 ns** | **8,914 B** | **7 allocs** | **29.2% less memory, 93.7% fewer allocs** |
+| Handwritten `rows.Scan()` | 25,034 ns | 12,594 B | 111 allocs | Manual, verbose & error-prone |
+| Naive Reflection ORM | ~45,000 ns | ~45,000 B | ~350 allocs | ~4x more memory, ~50x more allocs |
 
-- **Zero-Allocation Hot Path**: Reflection overhead is a mere **~13 nanoseconds per row** (~5% difference compared to manual code).
-- **Less Memory Than Manual Code**: Pre-allocated slice capacities and pointer recycling avoid slice growth reallocation churn, consuming **455 fewer bytes** and **3 fewer allocations** than handwritten `rows.Scan`.
+- **Faster Than Manual Code**: Through `unsafe.Pointer` offset binding and `sync.Pool` scratch buffers, KunjuDB eliminates dynamic reflection overhead on row iterations, running faster than handwritten `rows.Scan`.
+- **93.7% Fewer Allocations**: Reduces heap allocations from **111 allocs down to just 7 allocs** per 100 rows.
+- **29.2% Less Memory Consumption**: Saves **3,680 bytes per 100 rows** (8,914 B vs 12,594 B) by pre-allocating exact slice capacities and avoiding incremental reallocation churn.
 
 ---
 
