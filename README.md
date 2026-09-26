@@ -178,16 +178,28 @@ err := db.Transaction(ctx, func(exec kunjudb.SqlExecutor) error {
 
 The `middleware/logger` package provides query logging with safe parameter interpolation (`$1, $2` or `?`), execution timing, and zero-allocation fast-paths designed for production.
 
-### Production Default Behavior
+### Production Default Behavior (Slow Queries & Errors Only)
 By default, the logger adheres to strict production hygiene:
 - **Fast Queries**: Executed with **zero allocations (~77ns)** and emit **no log output**, preventing disk flood and log noise.
-- **Slow Queries (>100ms)** & **Errors**: Automatically logged with full query text, parameter values, and execution time.
+- **Slow Queries (>100ms)**: Automatically logged as warnings with execution duration in milliseconds.
+- **Failed Queries**: Automatically logged as errors with root-cause details.
+
+| Query Condition | Execution Behavior | Output |
+| :--- | :--- | :--- |
+| Query takes **12ms** (Normal) | **Silent** (0 memory allocations) | *(Nothing emitted)* |
+| Query takes **145ms** (Slow) | **Logged as warning** | `⚠️  [SLOW QUERY] (145.20 ms): SELECT * FROM orders WHERE total > 1000` |
+| Query fails (**SQL Error**) | **Logged as error** | `❌ [SQL ERROR] (2.10 ms): SELECT * FROM invalid | err: table does not exist` |
 
 ```go
 import "github.com/kurianvarkey/kunjudb/middleware/logger"
 
-// Standard production default (logs slow queries >100ms and errors to os.Stdout)
+// 1. Standard 1-liner (logs slow queries >100ms and errors to os.Stdout)
 db := kunjudb.New(pool, dialects.PostgreSql{}, logger.Default())
+
+// 2. Custom slow query threshold (e.g. 200ms)
+db.Use(logger.New(logger.Config{
+    SlowThreshold: 200 * time.Millisecond,
+}))
 ```
 
 ---

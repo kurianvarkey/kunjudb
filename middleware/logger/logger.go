@@ -51,9 +51,6 @@ func New(cfg Config) kunjudb.Middleware {
 	if cfg.Writer == nil {
 		cfg.Writer = os.Stdout
 	}
-	if os.Getenv("DB_PROFILE") == "true" {
-		cfg.Profile = true
-	}
 
 	var sl *slog.Logger
 	if cfg.Logger != nil {
