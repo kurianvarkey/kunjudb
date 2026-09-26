@@ -45,12 +45,24 @@ func main() {
 	db := kunjudb.New(pool, dialects.PostgreSql{},
 		otel.NewTracingMiddleware,
 		securityMiddleware,
-		logger.Default(),
+		//logger.Default(),
 		profiler.New(pool, profiler.Config{
 			SlowThreshold:      100 * time.Millisecond,
 			EnableIndexAdvisor: true,
 		}),
 	)
+
+	// Open the log file
+	logFile, err := os.OpenFile("sql.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer logFile.Close()
+
+	db.Use(logger.New(logger.Config{
+		Writer:  logger.MultiWriter(os.Stdout, logFile),
+		Profile: true,
+	}))
 
 	// Using the high-speed scanner on a raw query
 	rows, err := db.Executor.QueryContext(context.Background(), "SELECT id, email FROM users WHERE id = $1", 1)
