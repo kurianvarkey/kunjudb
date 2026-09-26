@@ -174,6 +174,89 @@ err := db.Transaction(ctx, func(exec kunjudb.SqlExecutor) error {
 
 ---
 
+## 📝 SQL Query Logging
+
+The `middleware/logger` package provides query logging with safe parameter interpolation (`$1, $2` or `?`), execution timing, and zero-allocation fast-paths designed for production.
+
+### Production Default Behavior
+By default, the logger adheres to strict production hygiene:
+- **Fast Queries**: Executed with **zero allocations (~77ns)** and emit **no log output**, preventing disk flood and log noise.
+- **Slow Queries (>100ms)** & **Errors**: Automatically logged with full query text, parameter values, and execution time.
+
+```go
+import "github.com/kurianvarkey/kunjudb/middleware/logger"
+
+// Standard production default (logs slow queries >100ms and errors to os.Stdout)
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.Default())
+```
+
+---
+
+### Configuration Options (`logger.Config`)
+
+Configure behavior using standard Go types (`io.Writer` and `*slog.Logger`):
+
+```go
+type Config struct {
+    Writer        io.Writer     // Destination (os.Stdout, file, or io.MultiWriter)
+    SlowThreshold time.Duration // Slow query threshold (defaults to 100ms)
+    Profile       bool          // If true, logs EVERY query (or via DB_PROFILE=true)
+    JSON          bool          // If true, outputs structured JSON via log/slog
+    Logger        *slog.Logger  // Optional custom slog.Logger (takes precedence)
+}
+```
+
+#### 1. Local Development (Log Every Query to Console)
+Turn on profiling to inspect every executed query and its interpolated parameters:
+```go
+db.Use(logger.New(logger.Config{
+    Profile: true, // or run with DB_PROFILE=true in local .env
+}))
+```
+**Sample Console Output:**
+```text
+✅ [1.45 ms] SELECT * FROM users WHERE id = 1 AND active = TRUE
+```
+
+#### 2. Production Structured JSON (`log/slog`)
+Recommended for cloud collectors (Datadog, AWS CloudWatch, Grafana Loki, ELK). Fast queries are silent; only slow queries and failures are emitted:
+```go
+db.Use(logger.New(logger.Config{
+    JSON:          true,                   // structured JSON lines
+    SlowThreshold: 100 * time.Millisecond, // customizable threshold
+}))
+```
+**Sample JSON Output:**
+```json
+{"time":"2026-09-26T12:00:00Z","level":"WARN","msg":"Slow SQL Query","sql":"SELECT * FROM orders WHERE status = 'pending'","duration_ms":152.4,"slow_query":true}
+```
+
+#### 3. Terminal + File Dual Logging
+Stream logs to both the terminal (`os.Stdout`) and a log file using standard `io.MultiWriter` and proper resource cleanup:
+```go
+logFile, err := os.OpenFile("sql.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+if err != nil {
+    log.Fatal(err)
+}
+defer logFile.Close() // Proper resource hygiene
+
+db.Use(logger.New(logger.Config{
+    Writer:        io.MultiWriter(os.Stdout, logFile),
+    SlowThreshold: 100 * time.Millisecond,
+}))
+```
+
+#### 4. Custom Application Logger Injection
+Pass your existing service `*slog.Logger` to inherit application log levels, context handlers, and formats:
+```go
+db.Use(logger.New(logger.Config{
+    Logger: myAppLogger,
+}))
+```
+
+### Environment Variable
+- `DB_PROFILE=true`: Forces all queries to be logged across any environment without code changes.
+
 ## 🔍 Profiler & Automated Index Advisor
 
 When enabled, queries exceeding `SlowThreshold` are logged via `log/slog`. If attached to PostgreSQL, the profiler runs a non-blocking `EXPLAIN (FORMAT JSON)` with a 100ms timeout to detect sequential scans on filtered columns:

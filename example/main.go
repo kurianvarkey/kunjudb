@@ -45,7 +45,7 @@ func main() {
 	db := kunjudb.New(pool, dialects.PostgreSql{},
 		otel.NewTracingMiddleware,
 		securityMiddleware,
-		logger.New(logger.DefaultLogger{}),
+		logger.Default(),
 		profiler.New(pool, profiler.Config{
 			SlowThreshold:      100 * time.Millisecond,
 			EnableIndexAdvisor: true,
