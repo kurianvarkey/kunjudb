@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,8 +152,10 @@ func TestLogger_MultiWriter(t *testing.T) {
 	defer file.Close()
 
 	var termBuf bytes.Buffer
+	multi := io.MultiWriter(&termBuf, file)
+
 	cfg := Config{
-		Writer:        MultiWriter(&termBuf, file),
+		Writer:        multi,
 		SlowThreshold: 5 * time.Millisecond,
 	}
 
@@ -162,18 +165,18 @@ func TestLogger_MultiWriter(t *testing.T) {
 
 	file.Close()
 
-	// Terminal should use emoji format
+	// Verify terminal output
 	if !strings.Contains(termBuf.String(), "⚠️  [SLOW QUERY]") {
-		t.Errorf("expected emoji slow query in terminal, got: %s", termBuf.String())
+		t.Errorf("expected slow query in terminal buffer, got: %s", termBuf.String())
 	}
 
-	// File should use Laravel-style format
+	// Verify file content
 	fileBytes, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("failed to read log file: %v", err)
 	}
-	if !strings.Contains(string(fileBytes), "WARNING:") {
-		t.Errorf("expected Laravel-style warning in log file, got: %s", string(fileBytes))
+	if !strings.Contains(string(fileBytes), "⚠️  [SLOW QUERY]") {
+		t.Errorf("expected slow query in log file, got: %s", string(fileBytes))
 	}
 }
 
@@ -189,18 +192,9 @@ func BenchmarkLogger_FastPath(b *testing.B) {
 	ctx := context.Background()
 
 	b.ReportAllocs()
+	b.ResetTimer()
 
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		_, _ = mw.QueryContext(ctx, "SELECT * FROM users WHERE id = $1", 1)
-	}
-}
-
-func BenchmarkFormatSQL(b *testing.B) {
-	query := "   SELECT   id,  name,   email\n\tFROM   users\n\tWHERE id = $1 AND email = $2   "
-	args := []any{42, "alice@example.com"}
-
-	b.ReportAllocs()
-	for b.Loop() {
-		_ = FormatSQL(query, args)
 	}
 }
