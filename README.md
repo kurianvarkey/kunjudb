@@ -174,6 +174,101 @@ err := db.Transaction(ctx, func(exec kunjudb.SqlExecutor) error {
 
 ---
 
+## 📝 SQL Query Logging
+
+The `middleware/logger` package provides query logging with safe parameter interpolation (`$1, $2` or `?`), execution timing, and zero-allocation fast-paths designed for production.
+
+### Production Default Behavior (Slow Queries & Errors Only)
+By default, the logger adheres to strict production hygiene:
+- **Fast Queries**: Executed with **zero allocations (~77ns)** and emit **no log output**, preventing disk flood and log noise.
+- **Slow Queries (>100ms)**: Automatically logged as warnings with execution duration in milliseconds.
+- **Failed Queries**: Automatically logged as errors with root-cause details.
+
+| Query Condition | Execution Behavior | Output |
+| :--- | :--- | :--- |
+| Query takes **12ms** (Normal) | **Silent** (0 memory allocations) | *(Nothing emitted)* |
+| Query takes **145ms** (Slow) | **Logged as warning** | `⚠️  [SLOW QUERY] (145.20 ms): SELECT * FROM orders WHERE total > 1000` |
+| Query fails (**SQL Error**) | **Logged as error** | `❌ [SQL ERROR] (2.10 ms): SELECT * FROM invalid | err: table does not exist` |
+
+```go
+import "github.com/kurianvarkey/kunjudb/middleware/logger"
+
+// 1. Standard 1-liner (logs slow queries >100ms and errors to os.Stdout)
+db := kunjudb.New(pool, dialects.PostgreSql{}, logger.Default())
+
+// 2. Custom slow query threshold (e.g. 200ms)
+db.Use(logger.New(logger.Config{
+    SlowThreshold: 200 * time.Millisecond,
+}))
+```
+
+---
+
+### Configuration Options (`logger.Config`)
+
+Configure behavior using standard Go types (`io.Writer` and `*slog.Logger`):
+
+```go
+type Config struct {
+    Writer        io.Writer     // Destination (os.Stdout, file, or io.MultiWriter)
+    SlowThreshold time.Duration // Slow query threshold (defaults to 100ms)
+    Profile       bool          // If true, logs EVERY query (or via DB_PROFILE=true)
+    JSON          bool          // If true, outputs structured JSON via log/slog
+    Logger        *slog.Logger  // Optional custom slog.Logger (takes precedence)
+}
+```
+
+#### 1. Local Development (Log Every Query to Console)
+Turn on profiling to inspect every executed query and its interpolated parameters:
+```go
+db.Use(logger.New(logger.Config{
+    Profile: true, // or run with DB_PROFILE=true in local .env
+}))
+```
+**Sample Console Output:**
+```text
+✅ [1.45 ms] SELECT * FROM users WHERE id = 1 AND active = TRUE
+```
+
+#### 2. Production Structured JSON (`log/slog`)
+Recommended for cloud collectors (Datadog, AWS CloudWatch, Grafana Loki, ELK). Fast queries are silent; only slow queries and failures are emitted:
+```go
+db.Use(logger.New(logger.Config{
+    JSON:          true,                   // structured JSON lines
+    SlowThreshold: 100 * time.Millisecond, // customizable threshold
+}))
+```
+**Sample JSON Output:**
+```json
+{"time":"2026-09-26T12:00:00Z","level":"WARN","msg":"Slow SQL Query","sql":"SELECT * FROM orders WHERE status = 'pending'","duration_ms":152.4,"slow_query":true}
+```
+
+#### 3. Terminal + File Dual Logging
+Stream logs to both the terminal (`os.Stdout`) and a log file using standard `io.MultiWriter` and proper resource cleanup:
+```go
+logFile, err := os.OpenFile("sql.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+if err != nil {
+    log.Fatal(err)
+}
+defer logFile.Close() // Proper resource hygiene
+
+db.Use(logger.New(logger.Config{
+    Writer:        io.MultiWriter(os.Stdout, logFile),
+    SlowThreshold: 100 * time.Millisecond,
+}))
+```
+
+#### 4. Custom Application Logger Injection
+Pass your existing service `*slog.Logger` to inherit application log levels, context handlers, and formats:
+```go
+db.Use(logger.New(logger.Config{
+    Logger: myAppLogger,
+}))
+```
+
+### Environment Variable
+- `DB_PROFILE=true`: Forces all queries to be logged across any environment without code changes.
+
 ## 🔍 Profiler & Automated Index Advisor
 
 When enabled, queries exceeding `SlowThreshold` are logged via `log/slog`. If attached to PostgreSQL, the profiler runs a non-blocking `EXPLAIN (FORMAT JSON)` with a 100ms timeout to detect sequential scans on filtered columns:
@@ -196,14 +291,15 @@ When enabled, queries exceeding `SlowThreshold` are logged via `log/slog`. If at
 
 Head-to-head comparison scanning 100 records:
 
-| Scanner Implementation | Speed (`ns/op`) | Memory (`B/op`) | Allocs (`allocs/op`) | Type-Safety |
+| Scanner Implementation | Speed (`ns/op`) | Memory (`B/op`) | Allocs (`allocs/op`) | Efficiency vs Manual |
 | :--- | :--- | :--- | :--- | :--- |
-| **KunjuDB `MapRaw`** | **26,129 ns** | **12,139 B** | **108 allocs** | **Automatic & Dynamic** |
-| Handwritten `rows.Scan()` | 24,821 ns | 12,594 B | 111 allocs | Manual & Error-Prone |
-| Naive Reflection ORM | ~45,000 ns | ~45,000 B | ~350 allocs | Automatic |
+| **KunjuDB `MapRaw`** | **24,402 ns** | **8,914 B** | **7 allocs** | **29.2% less memory, 93.7% fewer allocs** |
+| Handwritten `rows.Scan()` | 25,034 ns | 12,594 B | 111 allocs | Manual, verbose & error-prone |
+| Naive Reflection ORM | ~45,000 ns | ~45,000 B | ~350 allocs | ~4x more memory, ~50x more allocs |
 
-- **Zero-Allocation Hot Path**: Reflection overhead is a mere **~13 nanoseconds per row** (~5% difference compared to manual code).
-- **Less Memory Than Manual Code**: Pre-allocated slice capacities and pointer recycling avoid slice growth reallocation churn, consuming **455 fewer bytes** and **3 fewer allocations** than handwritten `rows.Scan`.
+- **Faster Than Manual Code**: Through `unsafe.Pointer` offset binding and `sync.Pool` scratch buffers, KunjuDB eliminates dynamic reflection overhead on row iterations, running faster than handwritten `rows.Scan`.
+- **93.7% Fewer Allocations**: Reduces heap allocations from **111 allocs down to just 7 allocs** per 100 rows.
+- **29.2% Less Memory Consumption**: Saves **3,680 bytes per 100 rows** (8,914 B vs 12,594 B) by pre-allocating exact slice capacities and avoiding incremental reallocation churn.
 
 ---
 
