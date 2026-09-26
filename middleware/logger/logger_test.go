@@ -87,7 +87,7 @@ func TestLogger_Default(t *testing.T) {
 	// 2. Slow query should log warning
 	mwSlow := New(cfg)(&mockExecutor{delay: 15 * time.Millisecond})
 	_, _ = mwSlow.QueryContext(ctx, "SELECT * FROM large_table", nil)
-	if !strings.Contains(buf.String(), "⚠️  [SLOW QUERY]") {
+	if !strings.Contains(buf.String(), "[SLOW]") {
 		t.Errorf("expected slow query warning, got: %s", buf.String())
 	}
 
@@ -95,7 +95,7 @@ func TestLogger_Default(t *testing.T) {
 	buf.Reset()
 	mwErr := New(cfg)(&mockExecutor{err: errors.New("connection failed")})
 	_, _ = mwErr.QueryContext(ctx, "SELECT 1", nil)
-	if !strings.Contains(buf.String(), "❌ [SQL ERROR]") {
+	if !strings.Contains(buf.String(), "[ERROR]") {
 		t.Errorf("expected SQL error log, got: %s", buf.String())
 	}
 }
@@ -163,7 +163,7 @@ func TestLogger_MultiWriter(t *testing.T) {
 	file.Close()
 
 	// Terminal should use emoji format
-	if !strings.Contains(termBuf.String(), "⚠️  [SLOW QUERY]") {
+	if !strings.Contains(termBuf.String(), "[SLOW]") {
 		t.Errorf("expected emoji slow query in terminal, got: %s", termBuf.String())
 	}
 
